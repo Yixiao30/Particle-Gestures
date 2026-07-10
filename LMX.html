@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D手势粒子交互 - Heart / Firework / LMX</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+  canvas { display: block; }
+  #video { position: fixed; top: -9999px; left: -9999px; }
+  #ui {
+    position: fixed; top: 20px; right: 20px; z-index: 10;
+    background: rgba(10,10,15,0.8); backdrop-filter: blur(12px);
+    padding: 18px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.08);
+    color: #fff; min-width: 200px; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  #ui h3 { font-size: 13px; font-weight: 500; margin-bottom: 12px; opacity: 0.6; letter-spacing: 1px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .btn {
+    padding: 7px 16px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.04); color: #aaa; cursor: pointer; font-size: 13px;
+    transition: all .2s; user-select: none;
+  }
+  .btn:hover { background: rgba(255,255,255,0.1); color: #fff; }
+  .btn.active { background: #6c5ce7; border-color: #6c5ce7; color: #fff; }
+  input[type=color] { width: 32px; height: 32px; border: none; border-radius: 8px; cursor: pointer; background: none; padding: 0; vertical-align: middle; }
+  #status { font-size: 11px; opacity: 0.4; margin-top: 8px; }
+  #tip {
+    position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); z-index: 10;
+    color: rgba(255,255,255,0.25); font-size: 13px; text-align: center;
+    pointer-events: none; transition: opacity 1s;
+  }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <h3>✦ 手势粒子</h3>
+  <div class="row" id="shapeBtns">
+    <button class="btn active" data-shape="heart">♥ 爱心</button>
+    <button class="btn" data-shape="lmx">LMX</button>
+  </div>
+  <div class="row">
+    <label style="font-size:12px;opacity:0.5;line-height:32px;">颜色 </label>
+    <input type="color" id="colorPicker" value="#6c5ce7">
+    <button class="btn" id="fullscreenBtn">⛶ 全屏</button>
+  </div>
+  <div id="status">👋 请允许摄像头访问</div>
+</div>
+<div id="tip">张开 ⇢ 扩散 &nbsp;|&nbsp; 握拳 ⇢ 聚合 &nbsp;|&nbsp; 平移手掌 ⇢ 旋转视角</div>
+
+<video id="video" playsinline></video>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js"></script>
+
+<script>
+const PARTICLE_COUNT = 18000;
+let scene, camera, renderer, particles, geometry, material;
+let positions, colors, targetPositions, starPositions, currentShape = 'heart';
+let handOpenness = 0.5, targetOpenness = 0.5;
+let colorHex = 0x6c5ce7;
+let clock = new THREE.Clock();
+
+function initThree() {
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+  camera.position.z = 3.5;
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  document.body.prepend(renderer.domElement);
+
+  geometry = new THREE.BufferGeometry();
+  positions = new Float32Array(PARTICLE_COUNT * 3);
+  colors = new Float32Array(PARTICLE_COUNT * 3);
+  targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+  starPositions = new Float32Array(PARTICLE_COUNT * 3);
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const r = Math.pow(Math.random(), 0.33) * 8;
+    starPositions[i*3] = r * Math.sin(phi) * Math.cos(theta);
+    starPositions[i*3+1] = r * Math.sin(phi) * Math.sin(theta) * 0.7;
+    starPositions[i*3+2] = r * Math.cos(phi);
+    positions[i*3] = starPositions[i*3];
+    positions[i*3+1] = starPositions[i*3+1];
+    positions[i*3+2] = starPositions[i*3+2];
+  }
+
+
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  generateTextPoints();
+  computeShape('heart');
+
+  function makeStarTexture() {
+    const c = document.createElement('canvas'); c.width = 64; c.height = 64;
+    const ctx = c.getContext('2d');
+    const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.2, 'rgba(255,255,255,0.9)');
+    grad.addColorStop(0.6, 'rgba(255,255,255,0.3)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad; ctx.fillRect(0, 0, 64, 64);
+    return new THREE.CanvasTexture(c);
+  }
+  material = new THREE.PointsMaterial({
+    size: 0.045, vertexColors: true, transparent: true, opacity: 0.95,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+    sizeAttenuation: true, map: makeStarTexture(),
+  });
+  particles = new THREE.Points(geometry, material);
+  scene.add(particles);
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+}
+
+let lmxPoints = [];
+
+function strokePoints(x1, y1, x2, y2, count, thickness) {
+  const pts = [];
+  for (let i = 0; i < count; i++) {
+    const t = i / count;
+    const px = x1 + (x2 - x1) * t;
+    const py = y1 + (y2 - y1) * t;
+    if (thickness > 0) {
+      const angle = Math.atan2(y2 - y1, x2 - x1) + Math.PI / 2;
+      const off = (Math.random() - 0.5) * thickness;
+      pts.push({ x: px + Math.cos(angle) * off, y: py + Math.sin(angle) * off });
+    } else {
+      pts.push({ x: px, y: py });
+    }
+  }
+  return pts;
+}
+
+function strokeLen(x1, y1, x2, y2) {
+  return Math.sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1));
+}
+
+function generateTextPoints() {
+  const strokeThick = 0.2;
+  const gap = 0.6;
+
+  const lStrokes = [
+    { x1: 0, y1: 0.7, x2: 0, y2: -1.2 },
+    { x1: 0, y1: -1.2, x2: 0.9, y2: -1.2 },
+  ];
+  const mStrokes = [
+    { x1: 0, y1: 0.7, x2: 0, y2: -1.2 },
+    { x1: 0, y1: 0.7, x2: 0.65, y2: -1.2 },
+    { x1: 0.65, y1: -1.2, x2: 1.3, y2: 0.7 },
+    { x1: 1.3, y1: 0.7, x2: 1.3, y2: -1.2 },
+  ];
+  const xStrokes = [
+    { x1: 0, y1: 0.7, x2: 1.2, y2: -1.2 },
+    { x1: 1.2, y1: 0.7, x2: 0, y2: -1.2 },
+  ];
+
+  const lW = 0.9, mW = 1.3, xW = 1.2;
+  const totalW = lW + gap + mW + gap + xW;
+  const offL = -totalW / 2;
+  const offM = offL + lW + gap;
+  const offX = offM + mW + gap;
+
+  const allLetters = [
+    { strokes: lStrokes, offX: offL },
+    { strokes: mStrokes, offX: offM },
+    { strokes: xStrokes, offX: offX },
+  ];
+
+  let totalLen = 0;
+  const strokeList = [];
+  allLetters.forEach(letter => {
+    letter.strokes.forEach(s => {
+      const len = strokeLen(s.x1, s.y1, s.x2, s.y2);
+      totalLen += len;
+      strokeList.push({ ...s, offX: letter.offX, len });
+    });
+  });
+
+  const allPixels = [];
+  strokeList.forEach(s => {
+    const count = Math.max(1, Math.floor((s.len / totalLen) * PARTICLE_COUNT));
+    const pts = strokePoints(s.x1, s.y1, s.x2, s.y2, count, strokeThick);
+    pts.forEach(p => allPixels.push({ x: p.x + s.offX, y: p.y }));
+  });
+
+  lmxPoints = new Float32Array(PARTICLE_COUNT * 3);
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const p = allPixels[i % allPixels.length];
+    lmxPoints[i * 3] = p.x;
+    lmxPoints[i * 3 + 1] = p.y;
+    lmxPoints[i * 3 + 2] = (Math.random() - 0.5) * 0.08;
+  }
+}
+
+function computeShape(name) {
+  const t = targetPositions;
+  const cx = 0, cy = 0, cz = 0;
+  const s = 1.8;
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const u = Math.random();
+    const v = Math.random();
+    let x = 0, y = 0, z = (Math.random() - 0.5) * 0.3;
+
+    if (name === 'heart') {
+      const a = u * Math.PI * 2;
+      const r2 = v * 1.2;
+      const hx = r2 * 16 * Math.pow(Math.sin(a), 3);
+      const hy = r2 * (13 * Math.cos(a) - 5 * Math.cos(2*a) - 2 * Math.cos(3*a) - Math.cos(4*a));
+      x = hx / 14;
+      y = hy / 14;
+      z += (Math.random() - 0.5) * 0.25;
+
+    } else if (name === 'lmx') {
+      x = lmxPoints[i * 3];
+      y = lmxPoints[i * 3 + 1];
+      z = lmxPoints[i * 3 + 2];
+    }
+
+    t[i*3] = x;
+    t[i*3+1] = y;
+    t[i*3+2] = z;
+  }
+}
+
+function initMediaPipe() {
+  const hands = new Hands({
+    locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`
+  });
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.6,
+  });
+  hands.onResults(onResults);
+
+  const camera2 = new Camera(document.getElementById('video'), {
+    onFrame: async () => { await hands.send({ image: document.getElementById('video') }); },
+    width: 640, height: 480,
+  });
+  camera2.start().then(() => {
+    document.getElementById('status').textContent = '🟢 摄像头已就绪';
+  }).catch(() => {
+    document.getElementById('status').textContent = '⚠️ 摄像头无法访问，可用鼠标拖动视角';
+    document.getElementById('tip').textContent = '鼠标拖动旋转 | 滚轮缩放';
+    enableMouseControl();
+  });
+}
+
+function onResults(results) {
+  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+    const lm = results.multiHandLandmarks[0];
+    handActive = true;
+    handWrist.x = lm[0].x;
+    handWrist.y = lm[0].y;
+    let totalDist = 0, count = 0;
+    const tips = [4, 8, 12, 16, 20];
+    for (let i = 0; i < tips.length; i++) {
+      for (let j = i+1; j < tips.length; j++) {
+        const dx = lm[tips[i]].x - lm[tips[j]].x;
+        const dy = lm[tips[i]].y - lm[tips[j]].y;
+        totalDist += Math.sqrt(dx*dx + dy*dy);
+        count++;
+      }
+    }
+    const avgDist = totalDist / count;
+    targetOpenness = Math.min(1, Math.max(0, (avgDist - 0.05) * 4));
+    document.getElementById('status').textContent =
+      `🖐 手势: ${(targetOpenness * 100).toFixed(0)}%`;
+  } else {
+    handActive = false;
+  }
+}
+
+let mouseX = 0, mouseY = 0, mouseControl = false;
+let handWrist = { x: 0.5, y: 0.5 }, handActive = false;
+function enableMouseControl() {
+  mouseControl = true;
+  document.addEventListener('mousemove', (e) => {
+    mouseX = (e.clientX / window.innerWidth) * 2 - 1;
+    mouseY = -(e.clientY / window.innerHeight) * 2 + 1;
+  });
+  document.addEventListener('wheel', (e) => {
+    camera.position.z += e.deltaY * 0.005;
+    camera.position.z = Math.max(1.5, Math.min(10, camera.position.z));
+  });
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  handOpenness += (targetOpenness - handOpenness) * dt * 4;
+  const starBlend = Math.pow(Math.max(0, (handOpenness - 0.4) / 0.6), 1.2);
+  material.size = 0.02 + starBlend * 0.08;
+  material.opacity = 0.85 + starBlend * 0.15;
+
+  const pos = geometry.attributes.position.array;
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const i3 = i * 3;
+    const tx = targetPositions[i3] * (1 - starBlend) + starPositions[i3] * starBlend;
+    const ty = targetPositions[i3+1] * (1 - starBlend) + starPositions[i3+1] * starBlend;
+    const tz = targetPositions[i3+2] * (1 - starBlend) + starPositions[i3+2] * starBlend;
+    pos[i3] += (tx - pos[i3]) * dt * 5;
+    pos[i3+1] += (ty - pos[i3+1]) * dt * 5;
+    pos[i3+2] += (tz - pos[i3+2]) * dt * 5;
+    const r = ((colorHex >> 16) & 0xff) / 255;
+    const g = ((colorHex >> 8) & 0xff) / 255;
+    const b = (colorHex & 0xff) / 255;
+    if (starBlend > 0.01) {
+      const twinkle = 0.6 + Math.sin(i * 1.7 + Date.now() * 0.002) * 0.4;
+      colors[i3] = r * (0.3 + twinkle * 0.7 * starBlend);
+      colors[i3+1] = g * (0.3 + twinkle * 0.7 * starBlend);
+      colors[i3+2] = b * (0.3 + twinkle * 0.7 * starBlend);
+    } else {
+      colors[i3] = r; colors[i3+1] = g; colors[i3+2] = b;
+    }
+  }
+
+  geometry.attributes.position.needsUpdate = true;
+  geometry.attributes.color.needsUpdate = true;
+
+  if (handActive) {
+    const targetY = (0.5 - handWrist.x) * 4;
+    particles.rotation.y += (targetY - particles.rotation.y) * dt * 3;
+  } else if (mouseControl) {
+    particles.rotation.y += (mouseX * 0.5 - particles.rotation.y) * dt * 2;
+    particles.rotation.x += (mouseY * 0.3 - particles.rotation.x) * dt * 2;
+  } else {
+    particles.rotation.y += dt * 0.15;
+    particles.rotation.x = Math.sin(Date.now() * 0.0003) * 0.1;
+  }
+
+  renderer.render(scene, camera);
+}
+
+document.querySelectorAll('#shapeBtns .btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#shapeBtns .btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentShape = btn.dataset.shape;
+    computeShape(currentShape);
+  });
+});
+
+document.getElementById('colorPicker').addEventListener('input', (e) => {
+  colorHex = parseInt(e.target.value.substring(1), 16);
+});
+
+document.getElementById('fullscreenBtn').addEventListener('click', () => {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+});
+
+initThree();
+initMediaPipe();
+animate();
+
+setTimeout(() => { document.getElementById('tip').style.opacity = '0'; }, 8000);
+</script>
+</body>
+</html>
